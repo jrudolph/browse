@@ -13,6 +13,8 @@ class XRay(info: ProjectInfo) extends DefaultProject(info) {
     ("http://craigsworks.com/projects/qtip/packages/1.0.0-rc3/jquery.qtip-" + jquery_qtip_version + ".min.js")
   val jsManaged = descendents(configurationPath(js) ##, "*.js")
   val jqueryAll = (outputPath ##) / "jquery-all.js"
+  
+  val es = "net.virtualvoid" %% "scala-enhanced-strings" % "1.0"
 
   lazy val combineJquery = fileTask(jqueryAll from jsManaged) {
     delete(jqueryAll, log)

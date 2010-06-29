@@ -83,7 +83,7 @@ abstract class Browse extends Plugin
 		val scanner = new syntaxAnalyzer.UnitScanner(unit) { override def init {}; def parentInit = super.init }
 		implicit def iterator28(s: syntaxAnalyzer.UnitScanner) = 
 		{
-			class CompatIterator extends Iterator[(Int, Int, Int)]
+			class CompatIterator extends Iterator[(Int, Int, Int, String)]
 			{
 				def next =
 				{
@@ -92,8 +92,9 @@ abstract class Browse extends Plugin
 						implicit def keep27SourceCompatibility(a: AnyRef): Compat =  new Compat// won't ever be called
 					val offset = s.offset
 					val token = s.token
+					val strVal = s.strVal
 					s.nextToken
-					(offset, (s.lastOffset - offset) max 1, token)
+					(offset, (s.lastOffset - offset) max 1, token, strVal)
 				}
 				def hasNext = s.token != Tokens.EOF
 			}
@@ -101,7 +102,9 @@ abstract class Browse extends Plugin
 			scanner.parentInit
 			new { def iterator = new CompatIterator }
 		}
-		for( (offset, length, code) <- scanner.iterator)
+		for { t <- scanner.iterator 
+		      (offset, length, code, strVal) <- postProcessToken(t, unit)
+		    }
 		{
 			if(includeToken(code))
 				tokens += new Token(offset, length, code)
@@ -126,6 +129,49 @@ abstract class Browse extends Plugin
 
 		tokens
 	}
+	
+	private def postProcessToken(t: (Int, Int, Int, String), unit: CompilationUnit): List[(Int, Int, Int, String)] = t match {
+	  case (offset, length, Tokens.STRINGLIT, strVal) => {
+	    import net.virtualvoid.string._
+	    import scala.util.parsing.input.{Position, NoPosition}
+	    import scala.tools.nsc.util._
+	    
+	    def subScan(offset: Int, code: String) = {
+	      val newUnit = new CompilationUnit(new ScriptSourceFile(unit.source.asInstanceOf[BatchSourceFile], (code+" ").toCharArray, offset))
+	      println("Code: "+code)
+	      println(newUnit.toString)
+     	  val res = scan(newUnit).toList.map {case Token(ioffset, length, tok) => (ioffset + offset, length, tok)}
+     	  println(res)
+     	  res
+     	}
+  	    def collectExpTokens(c: AST.Exp): List[(Int, Int, Int)] = c match {
+  	      case i@AST.Ident(id) if i.pos != NoPosition => {println(id+": "+i.pos);List((offset + i.pos.column, id.length, Tokens.IDENTIFIER))}
+  	      case s@AST.ScalaExp(code) if s.pos != NoPosition => println(code+": "+s.pos+":"+offset); subScan(offset + s.pos.column, code)
+  	      case _ => Nil
+  	    }
+	    def collectTokens(c: AST.FormatElement): List[(Int, Int, Int)] = c match {
+	      case AST.ToStringConversion(exp) => collectExpTokens(exp)
+	      case AST.Conditional(cond, AST.FormatElementList(then), AST.FormatElementList(elseToks)) => 
+	        collectExpTokens(cond) ++ then.flatMap(collectTokens) ++ elseToks.flatMap(collectTokens)
+	      case AST.Expand(exp, sep, AST.FormatElementList(inner)) =>
+	        collectExpTokens(exp) ++ inner.flatMap(collectTokens)
+	      case l@AST.Literal(text) if l.pos != NoPosition => {println(text+": "+l.pos);List((offset + l.pos.column, text.length, Tokens.STRINGLIT))}
+	      case _ => Nil
+	    }
+	    
+	    try {
+          val ast = EnhancedStringFormatParser.parse(strVal)
+          
+          val res = for ((offset, length, tok) <- ast.elements.toList.flatMap(collectTokens))
+	        yield (offset, length, tok, "")
+	      println(res)
+	      res
+        } catch {
+          case _: ParseException => Nil
+        }
+	  }
+	  case _ => List(t)
+	}
 	/** Filters out unwanted tokens such as whitespace and commas.  Braces are currently
 	* included because () is annotated as Unit, and a partial function created by
 	* { case ... } is associated with the opening brace.  */
@@ -139,11 +185,15 @@ abstract class Browse extends Plugin
 		}
 	}
 	/** Gets the token for the given offset.*/
-	private def tokenAt(tokens: wrap.SortedSetWrapper[Token], offset: Int): Option[Token] =
+	private def tokenAt(tokens: wrap.SortedSetWrapper[Token], offset: Int, t: Tree): Option[Token] =
 	{
 		// create artificial tokens to get a subset of the tokens starting at the given offset
 		// then, take the first token in the range
-		tokens.range(new Token(offset, 1, 0), new Token(offset+1, 1, 0)).first
+	        println("trying to find token at "+offset+" for "+t)
+		val res = tokens.range(new Token(offset, 1, 0), new Token(offset+1, 1, 0)).first
+		if (res.isEmpty)
+		  println("No token found for "+t+":"+t.getClass+":"+offset)
+		res
 	}
 
 	/** Filters unwanted symbols, such as packages.*/
@@ -198,10 +248,20 @@ abstract class Browse extends Plugin
 			// this implicit exists for 2.7/2.8 compatibility
 			implicit def source2Option(s: SourceFile): Option[SourceFile] = Some(s)
 			def catchToNone[T](f: => Option[T]): Option[T] = try { f } catch { case e: UnsupportedOperationException => None }
-			for(tSource <- catchToNone(t.pos.source) if tSource == source; offset <- t.pos.offset; token <- tokenAt(tokens, offset))
+		        {
+			  val myTSource = catchToNone(t.pos.source)
+			  println("Processing ["+t.getClass+"]"+t+":"+myTSource+"("+(myTSource.map(_ == source))+")"+":"+t.pos.offset)
+			  for (s <- myTSource) {
+			    println("Source "+s+":"+s.getClass)
+			    println("Source2 "+source+":"+source.getClass)
+			  }
+			}
+			for(tSource <- catchToNone(t.pos.source) if tSource == source; offset <- t.pos.offset; token <- tokenAt(tokens, offset, t))
 			{
+			    println("Found token "+token)
 				def processDefaultSymbol() =
 				{
+				    println(t+":"+t.hasSymbol+":"+ignore(t.symbol))
 					if(t.hasSymbol && !ignore(t.symbol))
 						processSymbol(t, token, source.file.file, links)
 				}
@@ -261,6 +321,9 @@ abstract class Browse extends Plugin
 	private def processSymbol(t: Tree, token: Token, sourceFile: File, links: LinkMap)
 	{
 		val sym = t.symbol
+		
+		println("Now processing "+sym)
+		
 		def addDefinition()
 		{
 			val id = sym.id
@@ -291,7 +354,7 @@ abstract class Browse extends Plugin
 							case mt: MethodType if ts.hasFlag(Flags.IMPLICIT)=> "implicit " + fullName(sym) + " : " + typeString(sType)
 							case _ => typeString(sType)
 						}
-					//println("Term symbol " + sym.id + ": " + asString)
+					println("Term symbol " + sym.id + ": " + asString)
 					token.tpe = TypeAttribute(asString, linkTo(sourceFile, sType.typeSymbol, links))
 				}
 			case ts: TypeSymbol =>
