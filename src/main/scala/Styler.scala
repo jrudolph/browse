@@ -44,6 +44,7 @@ private class BasicStyler(title: String, baseStyle: String, baseJs: String, base
 	def apply(token: Token) =
 	{
 		val styleClasses = classes(token.code)
+		println("Token at "+token.start+" ("+token.code+") has classes "+styleClasses)
 		if(token.isPlain && styleClasses.isEmpty)
 			Nil
 		else
